@@ -1,192 +1,164 @@
-#include <Arduino.h>
 #include <SPI.h>
-#include <Adafruit_GFX.h>
-#include "Adafruit_ST7796S.h"
-#include "Agora20pt7b.h"
+#include <TFT_eSPI.h> 
 
-// -------- Pin mapping --------
-#define LED 8
-#define CS 1
-#define RS 9 
-#define RESET 10
-#define MOSI 3
-#define SCK 2
-
-#define TFT_BL LED
-#define TFT_CS CS
-#define TFT_DC RS
-#define TFT_RST RESET
-#define TFT_MOSI MOSI
-#define TFT_SCK SCK
-
-#define TFT_WIDTH (480)
-#define TFT_HEIGHT (320)
-
+// -------- Configuration --------
 #define CONWAY_GRID (100)
 #define SCALE (2)
-#define X_OFFSET (TFT_WIDTH - (CONWAY_GRID * SCALE)) / 2
-#define Y_OFFSET (TFT_HEIGHT - (CONWAY_GRID * SCALE)) / 2
-// Colors (5-6-5 format)
-#define C_BLACK 0x0000
-#define C_WHITE 0xFFFF
-#define C_BLUE  0x001F
-#define C_GREEN 0x07E0
+// Sprite size = 100 * 2 = 200 pixels square
+#define SPRITE_W (CONWAY_GRID * SCALE)
+#define SPRITE_H (CONWAY_GRID * SCALE)
 
+// Center the game on the screen (assuming 480x320)
+#define SCREEN_W 480
+#define SCREEN_H 320
+#define X_OFFSET ((SCREEN_W - SPRITE_W) / 2)
+#define Y_OFFSET ((SCREEN_H - SPRITE_H) / 2)
+
+// Colors (TFT_eSPI uses TFT_ prefix usually, but hex is same)
+#define C_BLACK TFT_BLACK
+#define C_WHITE TFT_WHITE
+#define C_GREEN TFT_GREEN
+
+// -------- Globals --------
 static uint8_t grid[CONWAY_GRID][CONWAY_GRID];
 static uint8_t prev[CONWAY_GRID][CONWAY_GRID];
 
+// 1. INITIALIZE OBJECTS
+TFT_eSPI tft = TFT_eSPI();           
+TFT_eSprite sprite = TFT_eSprite(&tft); 
+
+TFT_eSprite* lidar_graph1;
+TFT_eSprite* lidar_graph2;
+TFT_eSprite* lidar_graph1;
+
 typedef enum {
     RENDER_LOGO,
-    RENDER_APP    // Renamed from WAIT to imply the main app running
+    RENDER_APP
 } main_state_t;
 
 main_state_t c_state = RENDER_LOGO;
 main_state_t n_state = RENDER_LOGO;
 
-int8_t offsets[8][2] = { 
+const int8_t offsets[8][2] = { 
     {-1, -1}, {0, -1}, {1, -1},
     {-1,  0},        {1,  0},
     {-1,  1}, {0,  1}, {1,  1}
 };
 
-Adafruit_ST7796S tft = Adafruit_ST7796S(TFT_CS, TFT_DC, TFT_RST);
+TFT_eSprite* createGraph(uint16_t width, uint16_t height, uint16_t color)
+{
+    // Use 'new' to allocate the object on the Heap (it survives function exit)
+    TFT_eSprite* ptr = new TFT_eSprite(&tft);
+
+    ptr->setColorDepth(16);
+    ptr->createSprite(width, height); // Allocates the RAM buffer
+    ptr->fillSprite(color);
+    
+    return ptr; // Return the address
+}
 
 void setup() {
-    randomSeed(micros());
+    Serial.begin(115200);
+    //randomSeed(analogRead(0)); // floating pin
+    
+    // 2. HARDWARE INIT
+    tft.init();
+    tft.setRotation(1); // Landscape
+    tft.fillScreen(C_WHITE);
+    
     pinMode(TFT_BL, OUTPUT);
     digitalWrite(TFT_BL, HIGH);
 
-    Serial.begin(115200);
-    // SPI Setup for RP2040
-    SPI.setSCK(TFT_SCK);
-    SPI.setTX(TFT_MOSI);
-    SPI.begin();
+    sprite.setColorDepth(16); // 16-bit color
+    sprite.createSprite(SPRITE_W, SPRITE_H); 
+    sprite.fillSprite(C_BLACK); 
 
-    tft.init();
-    tft.setRotation(1); // Landscape usually looks best for dashboards
-    tft.fillScreen(C_WHITE);
-
-    // allocate random grid
-    for (int i = 0; i < CONWAY_GRID; i++)
-    {
-        for (int j = 0; j < CONWAY_GRID; j++)
-        {
-            grid[i][j] = (rand() % 100) < 10;
+    for (int i = 0; i < CONWAY_GRID; i++) {
+        for (int j = 0; j < CONWAY_GRID; j++) {
+            grid[i][j] = (rand() % 100) < 7; 
+            
+            if(grid[i][j]) {
+                sprite.fillRect(j * SCALE, i * SCALE, SCALE, SCALE, C_GREEN);
+            }
         }
     }
     memcpy(prev, grid, sizeof(grid));
+    
+    sprite.pushSprite(X_OFFSET, Y_OFFSET);
 
+    lidar_graph1 = createGraph(200, 200); 
 }
 
-// --- ANIMATION VARIABLES ---
-unsigned long animStartTime = 0;
-int currentRadius = 10;
-int growDirection = 1;
-uint16_t loadingProgress = 0; // 0 to 480 (width of screen)
+uint16_t loadingProgress = 0; 
 
 void playStartupAnimation() {
-    //tft.setFont(&Agora20pt7b);
     static unsigned long lastFrameTime = 0;
     unsigned long now = millis();
     
-    // Limit to ~30 FPS (33ms) to leave CPU time for sensor init
-    if (now - lastFrameTime < 33) return; 
+    if (now - lastFrameTime < 33) return; // ~30 FPS
     lastFrameTime = now;
-
-    int centerX = tft.width() / 2;
-    int centerY = tft.height() / 2;
-
-    /*
-    // 1. ERASE PREVIOUS FRAME
-    // Instead of clearing the whole screen, just overwrite the old circle with Black
-    tft.drawCircle(centerX, centerY, currentRadius, C_BLACK);
-    tft.drawCircle(centerX, centerY, currentRadius - 1, C_BLACK); // Make lines thicker implies erasing thicker
-    */
-    // Simulate loading progress
-    loadingProgress += 1; 
 
     for (int i = 0; i < CONWAY_GRID; i++) {
       for (int j = 0; j < CONWAY_GRID; j++) {
-        int16_t x = X_OFFSET + j * SCALE;
-        int16_t y = Y_OFFSET + i * SCALE;
-
-        uint16_t color = grid[i][j] ? C_GREEN : C_WHITE;
-        if (prev[i][j] != grid[i][j])
-        {
-            // SCALE==2: draw a 2x2 block so it’s visible
-            tft.fillRect(x, y, SCALE, SCALE, color);
+        if (prev[i][j] != grid[i][j]) {
+            uint16_t color = grid[i][j] ? C_GREEN : C_BLACK;
+            
+            sprite.fillRect(j * SCALE, i * SCALE, SCALE, SCALE, color);
         }
       }
     }
 
-    // copy memory to the prev
+    sprite.pushSprite(X_OFFSET, Y_OFFSET);
+
+    loadingProgress += 2; 
+    tft.fillRect(0, tft.height() - 10, loadingProgress, 10, C_GREEN);
+
     memcpy(prev, grid, sizeof(grid));
 
     for (int i = 0; i < CONWAY_GRID; i++) {
       for (int j = 0; j < CONWAY_GRID; j++) {
-        // loop through offsets
         uint8_t living_num = 0;
-        for (int z = 0; z < 8; z++)
-        {
+        for (int z = 0; z < 8; z++) {
             int ni = (i + offsets[z][0] + CONWAY_GRID) % CONWAY_GRID;
             int nj = (j + offsets[z][1] + CONWAY_GRID) % CONWAY_GRID;
+            if (prev[ni][nj]) living_num++;
+        }
 
-            if (prev[ni][nj]) {
-                living_num++;
-            }
-        }
-        if (grid[i][j])
-        {
-            if (living_num < 2) grid[i][j] = 0;
-            if (living_num > 3) grid[i][j] = 0;
-        }
-        else 
-        {
-            if (living_num == 3) {grid[i][j] = 1; }
+        if (prev[i][j]) { 
+            if (living_num < 2 || living_num > 3) grid[i][j] = 0;
+            else grid[i][j] = 1;
+        } else {
+            if (living_num == 3) grid[i][j] = 1;
+            else grid[i][j] = 0; 
         }
       }
     }
-    // Simulation step
 
-    
-    // Draw Loading Bar at bottom
-    // We only draw the *new* segment to save SPI bandwidth
-    tft.fillRect(0, tft.height() - 10, loadingProgress, 10, C_GREEN);
-
-    // 4. CHECK EXIT CONDITION
     if (loadingProgress >= tft.width()) {
-        n_state = RENDER_APP; // Trigger state change
+        n_state = RENDER_APP;
         
-        // Cleanup: Clear screen for the main app to take over
+        sprite.deleteSprite(); // Free up the 80KB RAM for the main app!
         tft.fillScreen(C_BLACK); 
         
-        // Optional: Draw static UI elements here once (Backgrounds, Headers)
-        tft.setCursor(10, 10);
-        tft.setTextColor(C_WHITE);
-        tft.setTextSize(2);
-        tft.print("LIVE DATA FEED");
+        tft.setTextDatum(MC_DATUM); // Middle Center alignment
+        tft.setTextColor(C_WHITE, C_BLACK);
+        tft.drawString("LIVE DATA FEED", tft.width()/2, tft.height()/2, 4); 
     }
 }
 
 void loop() {
-    // State Switch
     switch (c_state) {
         case RENDER_LOGO:
             playStartupAnimation();
             break;
 
         case RENDER_APP:
-            tft.setFont(NULL);
-            // This is where your Lidar/Map loop goes
-            // For now, just a blinky heartbeat to prove we made it here
             static long last = 0;
             if (millis() - last > 500) {
+                lidar_graph1->pushSprite(100, 100);
                 last = millis();
-                Serial.println("Running Main App Loop...");
             }
             break;
     }
-    
-    // Commit state change
     c_state = n_state;
 }
