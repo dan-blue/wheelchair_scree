@@ -1,6 +1,9 @@
 #include "LidarPolar.h"
 #include <math.h>
 
+int dpx;
+int dpy;
+
 LidarPolar::LidarPolar(TFT_eSPI* tft, int x, int y, int w, int h, uint16_t c, uint16_t range)
     : Widget(tft, x, y, w, h), maxRange(range), color(c) {
     for (int i = 0; i < 360; i++) distances[i] = 0;
@@ -23,15 +26,25 @@ void LidarPolar::draw() {
     sprite->drawLine(cx, 0, cx, h, TFT_DARKGREY);
     sprite->drawLine(0, cy, w, cy, TFT_DARKGREY);
 
-    for (int theta = 0; theta < 360; theta++) {
+    for (int theta = 0; theta < 360; theta++) 
+    {
         uint16_t dist = distances[theta];
-        if (dist > 0 && dist < maxRange) {
-            float r_pixel = (float)dist / maxRange * (w / 2);
-            float rad = theta * (PI / 180.0);
-            int px = cx + (r_pixel * cos(rad - PI / 2));
-            int py = cy + (r_pixel * sin(rad - PI / 2));
+
+        float r_pixel = (float)dist / maxRange * (w / 2);
+        float rad = theta * (PI / 180.0);
+        int px = cx + (r_pixel * cos(rad - PI / 2));
+        int py = cy + (r_pixel * sin(rad - PI / 2));
+        if (dist > 0 && dist < maxRange) 
+        {
             sprite->drawPixel(px, py, color);
         }
+        else
+        {
+            sprite->drawPixel(dpx, dpy, TFT_BLACK);
+
+        }
+        dpx = px;
+        dpy = py;
     }
 
     sprite->setTextColor(TFT_WHITE);
